@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mon Projet CSS</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <!-- En-tête -->
+    <header>
+        <div class="container">
+            <h1>Bienvenue sur mon site web</h1>
+            <nav>
+                <ul>
+                    <li><a href="#home">Accueil</a></li>
+                    <li><a href="#about">À propos</a></li>
+                    <li><a href="#services">Services</a></li>
+                    <li><a href="#contact">Contact</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Section d'accueil -->
+    <section id="home">
+        <div class="container">
+            <h2>Accueil</h2>
+            <p>Cette page est un exemple de site web moderne, fluide et responsive.</p>
+        </div>
+    </section>
+
+    <!-- Section à propos -->
+    <section id="about">
+        <div class="container">
+            <h2>À propos de nous</h2>
+            <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed ut lectus vel erat vestibulum euismod.</p>
+        </div>
+    </section>
+
+    <!-- Section des services -->
+    <section id="services">
+        <div class="container">
+            <h2>Nos services</h2>
+            <div class="services-grid">
+                <div class="service-item">
+                    <h3>Service 1</h3>
+                    <p>Une description détaillée du service 1.</p>
+                </div>
+                <div class="service-item">
+                    <h3>Service 2</h3>
+                    <p>Une description détaillée du service 2.</p>
+                </div>
+                <div class="service-item">
+                    <h3>Service 3</h3>
+                    <p>Une description détaillée du service 3.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section contact -->
+    <section id="contact">
+        <div class="container">
+            <h2>Contactez-nous</h2>
+            <form>
+                <label for="name">Nom :</label>
+                <input type="text" id="name" name="name" required>
+
+                <label for="email">Email :</label>
+                <input type="email" id="email" name="email" required>
+
+                <label for="message">Message :</label>
+                <textarea id="message" name="message" rows="4" required></textarea>
+
+                <button type="submit">Envoyer</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- Pied de page -->
+    <footer>
+        <div class="container">
+            <p>&copy; 2025 Mon site web. Tous droits réservés.</p>
+        </div>
+    </footer>
+
+</body>
+</html>
