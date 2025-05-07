@@ -1,0 +1,763 @@
+import React, { useState, useRef, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+	Camera,
+	Upload,
+	FileText,
+	Check,
+	X,
+	Loader2,
+	AlertCircle,
+	Plus,
+	Minus,
+	RotateCw,
+} from "lucide-react";
+import { createWorker } from "tesseract.js";
+import {
+	usePrescriptionStore,
+	PrescriptionItem,
+} from "../stores/prescriptionStore";
+import { useAuthStore } from "../stores/authStore";
+
+const ScanPrescriptionPage = () => {
+	const navigate = useNavigate();
+	const { isAuthenticated } = useAuthStore();
+	const {
+		scanPrescription,
+		currentPrescription,
+		loading,
+		error,
+		requestQuotes,
+		getQuotesForPrescription,
+		clearError,
+	} = usePrescriptionStore();
+
+	const [capturedImage, setCapturedImage] = useState<string | null>(null);
+	const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+	const [showCamera, setShowCamera] = useState(false);
+	const [processingImage, setProcessingImage] = useState(false);
+	const [ocrResult, setOcrResult] = useState<string | null>(null);
+	const [extractedItems, setExtractedItems] = useState<PrescriptionItem[]>(
+		[]
+	);
+	const [step, setStep] = useState(1);
+	const [scanError, setScanError] = useState<string | null>(null);
+
+	const videoRef = useRef<HTMLVideoElement>(null);
+	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	useEffect(() => {
+		clearError();
+	}, [clearError]);
+
+	const startCamera = async () => {		
+		if (!isAuthenticated) {
+			navigate("/login", { state: { returnTo: "/scan-prescription" } });
+			return;
+		}
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({
+				video: { facingMode: "environment" },
+			});
+			if (videoRef.current) {
+				videoRef.current.srcObject = stream;
+			}
+			setShowCamera(true);
+		} catch (err) {
+			console.error("Error accessing camera:", err);
+			setScanError(
+				"Impossible d'accéder à la caméra. Veuillez vérifier les permissions."
+			);
+		}
+	};
+
+	const stopCamera = () => {
+		if (videoRef.current && videoRef.current.srcObject) {
+			const stream = videoRef.current.srcObject as MediaStream;
+			const tracks = stream.getTracks();
+			tracks.forEach((track) => track.stop());
+			videoRef.current.srcObject = null;
+		}
+		setShowCamera(false);
+	};
+
+	const captureImage = () => {
+		if (videoRef.current && canvasRef.current) {
+			const video = videoRef.current;
+			const canvas = canvasRef.current;
+
+			if (!video.srcObject) {
+				setScanError("Le flux vidéo est inaccessible");
+				return;
+			}
+
+			canvas.width = video.videoWidth;
+			canvas.height = video.videoHeight;
+
+			const ctx = canvas.getContext("2d");
+			if (!ctx) {
+				setScanError("Impossible d'obtenir le contexte du canvas");
+				return;
+			}
+
+			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+			const imageDataUrl = canvas.toDataURL("image/png");
+			setCapturedImage(imageDataUrl);
+			setUploadedImage(null);
+			stopCamera();
+			setStep(2);
+			setScanError(null);
+		}
+	};
+
+	const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+
+		// Vérifier la taille du fichier (max 5MB)
+		if (file.size > 5 * 1024 * 1024) {
+			setScanError("La taille du fichier ne doit pas dépasser 5MB");
+			return;
+		}
+
+		const reader = new FileReader();
+		reader.onload = (e) => {
+			const imageDataUrl = e.target?.result as string;
+			setUploadedImage(imageDataUrl);
+			setCapturedImage(null);
+			setStep(2);
+			setScanError(null);
+		};
+		reader.onerror = () => {
+			setScanError("Erreur lors de la lecture du fichier");
+		};
+		reader.readAsDataURL(file);
+	};
+
+	// Fonction pour améliorer la qualité de l'image avant OCR
+	const preprocessImage = (imageDataUrl: string): Promise<string> => {
+		return new Promise((resolve) => {
+			const img = new Image();
+			img.src = imageDataUrl;
+
+			img.onload = () => {
+				const canvas = document.createElement("canvas");
+				const ctx = canvas.getContext("2d");
+				if (!ctx) return resolve(imageDataUrl);
+
+				// Ajustement de la taille (optimal pour Tesseract ~300 DPI)
+				const scale = Math.min(1000 / img.width, 1000 / img.height);
+				canvas.width = img.width * scale;
+				canvas.height = img.height * scale;
+
+				// Étapes de pré-traitement :
+				ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+				// 1. Conversion en niveaux de gris
+				const imageData = ctx.getImageData(
+					0,
+					0,
+					canvas.width,
+					canvas.height
+				);
+				const data = imageData.data;
+
+				for (let i = 0; i < data.length; i += 4) {
+					const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+					data[i] = avg; // R
+					data[i + 1] = avg; // G
+					data[i + 2] = avg; // B
+				}
+
+				// 2. Amélioration du contraste
+				const contrast = 1.5; // Ajustable
+				const factor =
+					(259 * (contrast + 255)) / (255 * (259 - contrast));
+
+				for (let i = 0; i < data.length; i += 4) {
+					data[i] = factor * (data[i] - 128) + 128;
+					data[i + 1] = factor * (data[i + 1] - 128) + 128;
+					data[i + 2] = factor * (data[i + 2] - 128) + 128;
+				}
+
+				// 3. Binarisation (seuil adaptatif serait idéal mais complexe)
+				const threshold = 180; // Ajustable
+				for (let i = 0; i < data.length; i += 4) {
+					const avg = data[i];
+					data[i] =
+						data[i + 1] =
+						data[i + 2] =
+							avg > threshold ? 255 : 0;
+				}
+
+				ctx.putImageData(imageData, 0, 0);
+				resolve(canvas.toDataURL("image/jpeg", 0.9));
+			};
+
+			img.onerror = () => resolve(imageDataUrl);
+		});
+	};
+
+	const processImage = async () => {
+		const imageToProcess = capturedImage || uploadedImage;
+		if (!imageToProcess) return;
+
+		setProcessingImage(true);
+		setScanError(null);
+
+		try {
+			const processedImage = await preprocessImage(imageToProcess);
+
+			// Solution recommandée :
+			const worker = await createWorker();
+			await worker.loadLanguage("fra");
+			await worker.initialize("fra");
+
+			// Configuration critique pour les ordonnances médicales
+			await worker.setParameters({
+				tessedit_pageseg_mode: "6", // Mode segmentation "bloc uniforme de texte"
+				tessedit_char_whitelist:
+					"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZéèêëàâäôöûüçÉÈÊËÀÂÄÔÖÛÜÇ-,. ", // Caractères médicaux courants
+				preserve_interword_spaces: "1",
+				user_defined_dpi: "300", // Résolution supposée
+			});
+
+			const {
+				data: { text },
+			} = await worker.recognize(processedImage, {
+				rectangle: { top: 0, left: 0, width: 1000, height: 1000 }, // Zone à traiter
+			});
+			await worker.terminate();
+
+			setOcrResult(text);
+			const extractedMeds = extractMedications(text);
+
+			if (extractedMeds.length === 0) {
+				setScanError("Aucun médicament n'a été détecté...");
+			} else {
+				setExtractedItems(extractedMeds);
+				setStep(3);
+			}
+
+			setProcessingImage(false);
+		} catch (error) {
+			console.error("Error processing image:", error);
+			setProcessingImage(false);
+			setScanError("Erreur lors du traitement de l'image...");
+		}
+	};
+
+	// Ajoutez cette fonction AVANT extractMedications
+	const cleanOCRText = (text: string): string => {
+		// 1. Normaliser les sauts de ligne
+		let cleaned = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+		// 2. Supprimer les caractères spéciaux indésirables
+		cleaned = cleaned.replace(/[^\w\séèêëàâäôöûüçÉÈÊËÀÂÄÔÖÛÜÇ,.\d-]/g, " ");
+
+		// 3. Corriger les erreurs OCR courantes
+		const replacements: Record<string, string> = {
+			"1": "l",
+			"0": "o",
+			"5": "s",
+			"|": "l",
+			"€": "e",
+		};
+
+		Object.entries(replacements).forEach(([k, v]) => {
+			cleaned = cleaned.replace(new RegExp(k, "g"), v);
+		});
+
+		// 4. Supprimer les espaces multiples
+		cleaned = cleaned.replace(/\s+/g, " ").trim();
+
+		return cleaned;
+	};
+
+	const extractMedications = (text: string) => {
+		const cleanedText = cleanOCRText(text); // Maintenant la fonction est définie
+		const lines = cleanedText
+			.split("\n")
+			.filter((line) => line.trim() !== "");
+		const medications: PrescriptionItem[] = [];
+
+		// Regex améliorée
+		const medRegex =
+			/([A-Z][a-zéèêëàâäôöûüç]+(?:\s+[A-Z][a-zéèêëàâäôöûüç]+)*)\s*([\d,]+\s*(?:mg|g|ml|µg|UI|%|fois|par jour)?)/gi;
+		const durationRegex = /(\d+)\s*(?:jours?|semaines?|mois)/i;
+
+		lines.forEach((line) => {
+			// Correction des termes médicaux
+			line = correctMedicalTerms(line);
+
+			// Détection des médicaments
+			const medMatch = line.match(medRegex);
+			if (medMatch) {
+				medMatch.forEach((match) => {
+					const [_, name, dosage] =
+						match.match(/([A-Za-zéèêëàâäôöûüç]+)\s*(.*)/i) || [];
+					if (name && name.length > 2) {
+						medications.push({
+							id: `med-${Date.now()}-${Math.random()
+								.toString(36)
+								.substr(2, 9)}`,
+							name: name.trim(),
+							dosage: dosage?.trim() || "",
+							quantity: 1,
+						});
+					}
+				});
+			}
+		});
+
+		return medications;
+	};
+
+	const handleQuantityChange = (id: string, newQuantity: number) => {
+		if (newQuantity < 1 || newQuantity > 10) return;
+		setExtractedItems((items) =>
+			items.map((item) =>
+				item.id === id ? { ...item, quantity: newQuantity } : item
+			)
+		);
+	};
+
+	const handleSubmit = async () => {
+		if (!isAuthenticated) {
+			navigate("/login", { state: { returnTo: "/scan-prescription" } });
+			return;
+		}
+
+		const imageToSubmit = capturedImage || uploadedImage;
+		if (!imageToSubmit || extractedItems.length === 0) {
+			setScanError(
+				"Veuillez vérifier les médicaments avant de soumettre"
+			);
+			return;
+		}
+
+		try {
+			await scanPrescription(imageToSubmit, extractedItems);
+			setStep(4);
+			setScanError(null);
+		} catch (err) {
+			setScanError("Erreur lors de l'enregistrement de l'ordonnance");
+		}
+	};
+
+	const handleRequestQuotes = async () => {
+		if (currentPrescription) {
+			try {
+				await requestQuotes(currentPrescription.id);
+				navigate("/orders");
+			} catch (err) {
+				setScanError("Erreur lors de la demande de devis");
+			}
+		}
+	};
+
+	const resetScan = () => {
+		setCapturedImage(null);
+		setUploadedImage(null);
+		setOcrResult(null);
+		setExtractedItems([]);
+		setStep(1);
+		clearError();
+		setScanError(null);
+	};
+
+	return (
+		<div className='min-h-screen bg-gray-50'>
+			<div className='max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8'>
+				<h1 className='text-3xl font-bold mb-6'>
+					Scanner votre ordonnance
+				</h1>
+
+				{/* Indicateur de progression */}
+				<div className='mb-8'>
+					<div className='flex items-center'>
+						{[1, 2, 3, 4].map((stepNumber) => (
+							<React.Fragment key={stepNumber}>
+								<div
+									className={`flex items-center justify-center w-10 h-10 rounded-full ${
+										step >= stepNumber
+											? "bg-emerald-600 text-white"
+											: "bg-gray-200 text-gray-500"
+									}`}>
+									{stepNumber}
+								</div>
+								{stepNumber < 4 && (
+									<div
+										className={`flex-1 h-1 mx-2 ${
+											step > stepNumber
+												? "bg-emerald-600"
+												: "bg-gray-200"
+										}`}></div>
+								)}
+							</React.Fragment>
+						))}
+					</div>
+					<div className='flex justify-between mt-2'>
+						<div className='text-sm font-medium'>Capture</div>
+						<div className='text-sm font-medium'>Vérification</div>
+						<div className='text-sm font-medium'>Détails</div>
+						<div className='text-sm font-medium'>Confirmation</div>
+					</div>
+				</div>
+
+				{/* Affichage des erreurs */}
+				{(error || scanError) && (
+					<div className='mb-6 p-4 bg-red-50 text-red-700 rounded-lg flex items-start'>
+						<AlertCircle className='mr-3 flex-shrink-0' />
+						<div>{error || scanError}</div>
+						<button
+							onClick={() => {
+								clearError();
+								setScanError(null);
+							}}
+							className='ml-auto text-red-700 hover:text-red-900'>
+							<X size={20} />
+						</button>
+					</div>
+				)}
+
+				<div className='bg-white rounded-lg shadow-md p-6'>
+					{step === 1 && (
+						<div className='space-y-6'>
+							<h2 className='text-xl font-semibold mb-4'>
+								Capturez votre ordonnance
+							</h2>
+							<p className='text-gray-600 mb-6'>
+								Pour de meilleurs résultats, assurez-vous que
+								l'ordonnance est bien éclairée et placée sur un
+								fond contrasté. Évitez les reflets et les
+								ombres.
+							</p>
+
+							<div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
+								<div
+									className='border-2 border-dashed border-gray-300 rounded-lg p-6 flex flex-col items-center justify-center cursor-pointer hover:border-emerald-500 transition-colors'
+									onClick={startCamera}>
+									<Camera
+										size={48}
+										className='text-gray-400 mb-4'
+									/>
+									<p
+										className={`text-center ${
+											showCamera
+												? "text-red-500"
+												: "text-gray-600"
+										}`}>
+										{showCamera
+											? "Cliquez encore ici si la caméra n'est pas lancée"
+											: "Double cliquez pour prendre une photo avec la caméra"}
+									</p>
+								</div>
+
+								<div
+									className='border-2 border-dashed border-gray-300 rounded-lg p-6 flex flex-col items-center justify-center cursor-pointer hover:border-emerald-500 transition-colors'
+									onClick={() =>
+										fileInputRef.current?.click()
+									}>
+									<Upload
+										size={48}
+										className='text-gray-400 mb-4'
+									/>
+									<p className='text-center text-gray-600'>
+										Télécharger une image depuis votre
+										appareil
+									</p>
+									<input
+										type='file'
+										ref={fileInputRef}
+										className='hidden'
+										accept='image/*'
+										onChange={handleFileUpload}
+										capture='environment'
+									/>
+								</div>
+							</div>
+
+							{showCamera && (
+								<div className='mt-6'>
+									<div className='relative'>
+										<video
+											ref={videoRef}
+											autoPlay
+											playsInline
+											className='w-full rounded-lg'></video>
+										<canvas
+											ref={canvasRef}
+											style={{
+												display: "none",
+											}}></canvas>
+										<div className='absolute inset-0 flex items-center justify-center'>
+											<div className='border-2 border-emerald-500 rounded-lg w-3/4 h-2/3'></div>
+										</div>
+										<button
+											onClick={captureImage}
+											className='absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-emerald-600 text-white p-3 rounded-full hover:bg-emerald-700'>
+											<Camera size={24} />
+										</button>
+									</div>
+									<button
+										onClick={stopCamera}
+										className='mt-4 text-gray-600 hover:text-gray-800 flex items-center'>
+										<X size={16} className='mr-1' /> Annuler
+									</button>
+								</div>
+							)}
+						</div>
+					)}
+
+					{step === 2 && (
+						<div className='space-y-6'>
+							<h2 className='text-xl font-semibold mb-4'>
+								Vérification de l'image
+							</h2>
+
+							<div className='flex flex-col md:flex-row gap-6'>
+								<div className='flex-1'>
+									<div className='bg-gray-100 rounded-lg p-2'>
+										<img
+											src={
+												capturedImage ||
+												uploadedImage ||
+												""
+											}
+											alt='Ordonnance scannée'
+											className='max-w-full max-h-80 object-contain mx-auto'
+										/>
+									</div>
+								</div>
+
+								<div className='flex-1'>
+									<div className='bg-gray-50 p-4 rounded-lg'>
+										<h3 className='font-medium mb-2'>
+											Conseils :
+										</h3>
+										<ul className='text-sm text-gray-600 space-y-2 list-disc pl-5'>
+											<li>
+												L'image doit être nette et bien
+												lisible
+											</li>
+											<li>
+												Les médicaments doivent être
+												visibles
+											</li>
+											<li>
+												Évitez les reflets et les ombres
+											</li>
+										</ul>
+									</div>
+								</div>
+							</div>
+
+							<div className='mt-4 flex justify-between'>
+								<button
+									onClick={resetScan}
+									className='bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 flex items-center'>
+									<RotateCw size={16} className='mr-2' />{" "}
+									Recommencer
+								</button>
+								<button
+									onClick={processImage}
+									className='bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 flex items-center'
+									disabled={processingImage}>
+									{processingImage ? (
+										<>
+											<Loader2
+												size={16}
+												className='animate-spin mr-2'
+											/>
+											Traitement...
+										</>
+									) : (
+										<>
+											<FileText
+												size={16}
+												className='mr-2'
+											/>
+											Envoyer
+										</>
+									)}
+								</button>
+							</div>
+						</div>
+					)}
+
+					{step === 3 && (
+						<div className='space-y-6'>
+							<h2 className='text-xl font-semibold mb-4'>
+								Vérifiez les médicaments extraits
+							</h2>
+
+							{ocrResult && (
+								<details className='mb-4'>
+									<summary className='text-emerald-600 cursor-pointer'>
+										Afficher le texte extrait
+									</summary>
+									<pre className='mt-2 p-3 bg-gray-50 rounded-lg text-sm overflow-auto max-h-40'>
+										{ocrResult}
+									</pre>
+								</details>
+							)}
+
+							<div className='space-y-4'>
+								{extractedItems.length > 0 ? (
+									extractedItems.map((item) => (
+										<div
+											key={item.id}
+											className='flex items-center justify-between p-3 bg-gray-50 rounded-lg'>
+											<div className='flex-1'>
+												<p className='font-medium'>
+													{item.name}
+												</p>
+												{item.dosage && (
+													<p className='text-sm text-gray-500'>
+														Dosage: {item.dosage}
+													</p>
+												)}
+											</div>
+											<div className='flex items-center space-x-3'>
+												<button
+													onClick={() =>
+														handleQuantityChange(
+															item.id,
+															item.quantity - 1
+														)
+													}
+													className='bg-gray-200 text-gray-800 p-1 rounded hover:bg-gray-300 disabled:opacity-50'
+													disabled={
+														item.quantity <= 1
+													}>
+													<Minus size={16} />
+												</button>
+												<span className='w-8 text-center'>
+													{item.quantity}
+												</span>
+												<button
+													onClick={() =>
+														handleQuantityChange(
+															item.id,
+															item.quantity + 1
+														)
+													}
+													className='bg-gray-200 text-gray-800 p-1 rounded hover:bg-gray-300 disabled:opacity-50'
+													disabled={
+														item.quantity >= 10
+													}>
+													<Plus size={16} />
+												</button>
+											</div>
+										</div>
+									))
+								) : (
+									<div className='text-center py-8 text-gray-500'>
+										Aucun médicament n'a été détecté.
+										Veuillez réessayer avec une image plus
+										claire.
+									</div>
+								)}
+							</div>
+
+							<div className='flex justify-between pt-4'>
+								<button
+									onClick={() => setStep(2)}
+									className='bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300'>
+									Retour
+								</button>
+								<button
+									onClick={handleSubmit}
+									className='bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 disabled:opacity-50'
+									disabled={
+										loading || extractedItems.length === 0
+									}>
+									{loading ? (
+										<Loader2
+											size={16}
+											className='animate-spin mr-2'
+										/>
+									) : (
+										<Check size={16} className='mr-2' />
+									)}
+									Confirmer
+								</button>
+							</div>
+						</div>
+					)}
+
+					{step === 4 && currentPrescription && (
+						<div className='space-y-6'>
+							<h2 className='text-xl font-semibold mb-4'>
+								Ordonnance enregistrée avec succès
+							</h2>
+
+							<div className='bg-emerald-50 text-emerald-700 p-4 rounded-lg flex items-start'>
+								<Check className='mr-3 flex-shrink-0' />
+								<div>
+									<p className='font-medium'>
+										Votre ordonnance a bien été enregistrée.
+									</p>
+									<p className='text-sm mt-1'>
+										Vous pouvez maintenant demander des
+										devis pour ces médicaments.
+									</p>
+								</div>
+							</div>
+
+							<div className='space-y-3'>
+								<h3 className='font-medium'>
+									Médicaments prescrits :
+								</h3>
+								{currentPrescription.items.map((item) => (
+									<div
+										key={item.id}
+										className='flex justify-between p-3 bg-gray-50 rounded-lg'>
+										<div>
+											<p className='font-medium'>
+												{item.name}
+											</p>
+											{item.dosage && (
+												<p className='text-sm text-gray-500'>
+													{item.dosage}
+												</p>
+											)}
+										</div>
+										<div className='text-gray-700'>
+											x{item.quantity}
+										</div>
+									</div>
+								))}
+							</div>
+
+							<div className='flex justify-between pt-4'>
+								<button
+									onClick={resetScan}
+									className='bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300'>
+									Scanner une nouvelle ordonnance
+								</button>
+								<button
+									onClick={handleRequestQuotes}
+									className='bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 disabled:opacity-50'
+									disabled={loading}>
+									{loading ? (
+										<Loader2
+											size={16}
+											className='animate-spin mr-2'
+										/>
+									) : (
+										"Demander des devis"
+									)}
+								</button>
+							</div>
+						</div>
+					)}
+				</div>
+			</div>
+		</div>
+	);
+};
+
+export default ScanPrescriptionPage;
